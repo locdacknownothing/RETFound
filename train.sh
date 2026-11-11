@@ -9,7 +9,7 @@ FINETUNE="RETFound_dinov2_meh"
 # change the dataset name and corresponding class number
 DATASET="MESSIDOR2"
 NUM_CLASS=5
-data_path="./${DATASET}"
+data_path="./data/${DATASET}"
 task="${MODEL_ARCH}_${DATASET}_${ADAPTATION}"
 
 torchrun --nproc_per_node=1 --master_port=48766 main_finetune.py \
