@@ -137,14 +137,26 @@ def get_args_parser():
     parser.add_argument("--clip_grad", default=1.0, type=float)
     parser.add_argument(
         "--loss",
-        default="bce,dice",
+        default="bce,dice,cldice,skelrec",
         type=str,
         help="Comma-separated loss terms: bce,dice[,cldice,skelrec]",
     )
+    parser.add_argument("--bce_weight", default=1.0, type=float)
+    parser.add_argument("--dice_weight", default=1.0, type=float)
+    parser.add_argument("--cldice_weight", default=0.3, type=float)
+    parser.add_argument("--skelrec_weight", default=0.2, type=float)
+    parser.add_argument("--cldice_iter", default=10, type=int)
+    parser.add_argument("--topo_warmup_epochs", default=10, type=int)
     parser.add_argument("--pos_weight", default=0.0, type=float)
 
     # ---- Evaluation & runtime
     parser.add_argument("--eval_every", default=5, type=int)
+    parser.add_argument(
+        "--select_metric",
+        default="dice_cldice",
+        choices=["dice", "cldice", "dice_cldice"],
+        help="Validation metric used to select checkpoint-best.pth",
+    )
     parser.add_argument("--tta", action="store_true", default=False)
     parser.add_argument("--sliding_window", action="store_true", default=False)
     parser.add_argument("--eval", action="store_true", default=False)
@@ -230,14 +242,20 @@ def save_seg_checkpoint(
     model_without_ddp: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
+    best_val_score: float,
     best_val_dice: float,
+    best_val_cldice: float,
+    select_metric: str,
     best_tau: float,
     args,
 ):
     payload = {
         "model": trainable_and_buffer_state_dict(model_without_ddp),
         "epoch": int(epoch),
+        "best_val_score": float(best_val_score),
         "best_val_dice": float(best_val_dice),
+        "best_val_cldice": float(best_val_cldice),
+        "select_metric": str(select_metric),
         "best_tau": float(best_tau),
         "args": vars(args),
     }
@@ -258,7 +276,8 @@ def main(args):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    cudnn.benchmark = True
+    # Avoid large cuDNN autotune FFT/Winograd workspaces (~6.4 GB at 592x592) and keep eval deterministic
+    cudnn.benchmark = False
 
     device = torch.device(args.device)
     dataset_name = infer_dataset_name(args.data_path, args.dataset)
@@ -360,8 +379,21 @@ def main(args):
 
     criterion = VesselSegmentationLoss(
         loss_terms=args.loss,
+        bce_weight=args.bce_weight,
+        dice_weight=args.dice_weight,
+        cldice_weight=args.cldice_weight,
+        skelrec_weight=args.skelrec_weight,
+        cldice_iter=args.cldice_iter,
         pos_weight=args.pos_weight if args.pos_weight > 0 else None,
     ).to(device)
+    print(
+        f"[Loss] terms={args.loss} | weights=(bce={criterion.bce_weight if criterion.use_bce else 0.0}, "
+        f"dice={criterion.dice_weight if criterion.use_dice else 0.0}, "
+        f"cldice={criterion.cldice_weight if criterion.use_cldice else 0.0}, "
+        f"skelrec={criterion.skelrec_weight if criterion.use_skelrec else 0.0}) | "
+        f"cldice_iter={args.cldice_iter}, topo_warmup_epochs={args.topo_warmup_epochs} | "
+        f"select_metric={args.select_metric}"
+    )
 
     param_groups = build_optimizer_param_groups(model_without_ddp, args)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr_decoder)
@@ -387,7 +419,9 @@ def main(args):
 
     print(f"Start vessel segmentation training for {args.epochs} epochs")
     start_time = time.time()
+    best_val_score = -1.0
     best_val_dice = -1.0
+    best_val_cldice = -1.0
     best_val_tau = 0.5
     best_epoch = -1
     ckpt_best_path = os.path.join(task_out_dir, "checkpoint-best.pth")
@@ -413,7 +447,7 @@ def main(args):
         }
 
         if should_eval:
-            val_stats, val_dice, val_tau = evaluate_seg(
+            val_stats, val_score, val_tau = evaluate_seg(
                 data_loader_val,
                 model,
                 criterion,
@@ -425,8 +459,10 @@ def main(args):
                 save_preds=False,
             )
             log_stats.update({f"val_{k}": v for k, v in val_stats.items()})
-            if val_dice > best_val_dice:
-                best_val_dice = val_dice
+            if val_score > best_val_score:
+                best_val_score = val_score
+                best_val_dice = float(val_stats["pooled_dice"])
+                best_val_cldice = float(val_stats["mean_cldice"])
                 best_val_tau = val_tau
                 best_epoch = epoch
                 if args.savemodel:
@@ -435,13 +471,16 @@ def main(args):
                         model_without_ddp,
                         optimizer,
                         epoch,
+                        best_val_score,
                         best_val_dice,
+                        best_val_cldice,
+                        args.select_metric,
                         best_val_tau,
                         args,
                     )
             print(
-                f"Best val epoch = {best_epoch}, Best val Dice@0.5 = {best_val_dice:.4f} "
-                f"(val opt_tau = {best_val_tau:.2f})"
+                f"Best val epoch = {best_epoch}, Best val {args.select_metric} = {best_val_score:.4f} "
+                f"(Dice@0.5={best_val_dice:.4f}, clDice@0.5={best_val_cldice:.4f}, val opt_tau={best_val_tau:.2f})"
             )
 
         if log_writer is not None:
@@ -457,14 +496,19 @@ def main(args):
         model.to(device)
         best_epoch = ckpt.get("epoch", best_epoch)
         best_val_tau = ckpt.get("best_tau", best_val_tau)
+        best_val_score = ckpt.get("best_val_score", best_val_score)
+        best_val_dice = ckpt.get("best_val_dice", best_val_dice)
+        best_val_cldice = ckpt.get("best_val_cldice", best_val_cldice)
         print(
             f"\n=== Evaluating on TEST split with best checkpoint from epoch {best_epoch} "
-            f"(val Dice@0.5={ckpt.get('best_val_dice', 0.0):.4f}) ==="
+            f"(val {args.select_metric}={best_val_score:.4f}, "
+            f"val Dice@0.5={best_val_dice:.4f}, "
+            f"val clDice@0.5={best_val_cldice:.4f}) ==="
         )
     else:
         print("\n=== Evaluating on TEST split with final epoch model ===")
 
-    test_stats, test_dice, _ = evaluate_seg(
+    test_stats, test_score, _ = evaluate_seg(
         data_loader_test,
         model,
         criterion,
@@ -485,8 +529,21 @@ def main(args):
                 "model": args.model,
                 "adaptation": args.adaptation,
                 "seed": args.seed,
+                "enhance": bool(args.enhance),
+                "crop_size": int(args.crop_size),
+                "crops_per_image": int(args.crops_per_image),
+                "loss": args.loss,
+                "bce_weight": float(args.bce_weight),
+                "dice_weight": float(args.dice_weight),
+                "cldice_weight": float(args.cldice_weight),
+                "skelrec_weight": float(args.skelrec_weight),
+                "cldice_iter": int(args.cldice_iter),
+                "topo_warmup_epochs": int(args.topo_warmup_epochs),
+                "select_metric": args.select_metric,
                 "best_val_epoch": best_epoch,
+                "best_val_score": best_val_score,
                 "best_val_dice_05": best_val_dice,
+                "best_val_cldice_05": best_val_cldice,
                 "best_val_tau": best_val_tau,
                 "test": test_stats,
             },

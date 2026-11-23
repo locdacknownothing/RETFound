@@ -1,6 +1,7 @@
 import math
 from typing import Dict, List, Optional, Tuple
 import numpy as np
+from skimage.morphology import skeletonize
 from sklearn.metrics import roc_auc_score
 
 
@@ -54,11 +55,50 @@ def metrics_from_confusion(tp: int, fp: int, tn: int, fn: int) -> Dict[str, floa
     }
 
 
+def _cl_score(v: np.ndarray, s: np.ndarray) -> float:
+    """Compute fraction of binary skeleton pixels `s` covered by binary volume `v`."""
+    s_sum = int(s.sum())
+    if s_sum <= 0:
+        return 0.0
+    return float(np.logical_and(v, s).sum() / float(s_sum))
+
+
+def compute_cldice(
+    pred_bin: np.ndarray,
+    gt_bin: np.ndarray,
+    fov_mask: Optional[np.ndarray] = None,
+) -> float:
+    """Compute 2D centerline-Dice (clDice) inside `fov_mask` with empty-mask guards."""
+    v_p = pred_bin.astype(bool)
+    v_l = gt_bin.astype(bool)
+    if fov_mask is not None:
+        m = fov_mask.astype(bool)
+        v_p = np.logical_and(v_p, m)
+        v_l = np.logical_and(v_l, m)
+
+    p_any = bool(v_p.any())
+    l_any = bool(v_l.any())
+    if not p_any and not l_any:
+        return 1.0
+    if not p_any or not l_any:
+        return 0.0
+
+    s_p = skeletonize(v_p)
+    s_l = skeletonize(v_l)
+    tprec = _cl_score(v_l, s_p)
+    tsens = _cl_score(v_p, s_l)
+    denom = tprec + tsens
+    if denom <= 0.0:
+        return 0.0
+    return float(2.0 * tprec * tsens / denom)
+
+
 def compute_image_metrics(
     prob: np.ndarray,
     gt: np.ndarray,
     fov_mask: Optional[np.ndarray] = None,
     threshold: float = 0.5,
+    compute_cldice_metric: bool = True,
 ) -> Tuple[Dict[str, float], Tuple[int, int, int, int]]:
     """Compute per-image metrics: FOV-masked thresholded metrics + full-image AUC-ROC."""
     gt_bin = (gt > 0.5).astype(np.uint8)
@@ -68,6 +108,8 @@ def compute_image_metrics(
 
     tp, fp, tn, fn = confusion_from_binary(pred_bin, gt_bin, fov_mask=fov_mask)
     m = metrics_from_confusion(tp, fp, tn, fn)
+    if compute_cldice_metric:
+        m["cldice"] = compute_cldice(pred_bin, gt_bin, fov_mask=fov_mask)
 
     # AUC is computed over all pixels (not restricted to FOV mask)
     flat_gt = gt_bin.ravel()
@@ -125,6 +167,7 @@ def evaluate_dataset_predictions(
     fov_masks: Optional[List[np.ndarray]] = None,
     names: Optional[List[str]] = None,
     threshold: float = 0.5,
+    compute_cldice_metric: bool = True,
 ) -> Dict[str, object]:
     """Compute per-image, mean±std, and pooled dataset metrics."""
     per_image: List[Dict[str, object]] = []
@@ -135,7 +178,11 @@ def evaluate_dataset_predictions(
     for idx, (prob, gt) in enumerate(zip(probs, gts)):
         fov = fov_masks[idx] if fov_masks is not None else None
         img_m, (tp, fp, tn, fn) = compute_image_metrics(
-            prob, gt, fov_mask=fov, threshold=threshold
+            prob,
+            gt,
+            fov_mask=fov,
+            threshold=threshold,
+            compute_cldice_metric=compute_cldice_metric,
         )
         total_tp += tp
         total_fp += fp
@@ -157,7 +204,11 @@ def evaluate_dataset_predictions(
     else:
         pooled["auc"] = 0.0
 
-    keys = ["dice", "jaccard", "se", "sp", "acc", "mcc", "auc"]
+    keys = (
+        ["dice", "cldice", "jaccard", "se", "sp", "acc", "mcc", "auc"]
+        if compute_cldice_metric
+        else ["dice", "jaccard", "se", "sp", "acc", "mcc", "auc"]
+    )
     mean_metrics = {
         k: float(np.mean([float(r[k]) for r in per_image])) for k in keys
     }

@@ -35,20 +35,24 @@ def train_one_epoch_seg(
     optimizer.zero_grad(set_to_none=True)
 
     num_steps = len(data_loader)
+    topo_warmup = float(getattr(args, "topo_warmup_epochs", 0))
     for data_iter_step, (samples, targets) in enumerate(
         metric_logger.log_every(data_loader, print_freq, f"Epoch: [{epoch}]")
     ):
+        progress = data_iter_step / num_steps + epoch
         if data_iter_step % accum_iter == 0:
-            lr_sched.adjust_learning_rate(
-                optimizer, data_iter_step / num_steps + epoch, args
-            )
+            lr_sched.adjust_learning_rate(optimizer, progress, args)
+
+        topo_scale = (
+            min(1.0, max(0.0, progress / topo_warmup)) if topo_warmup > 0.0 else 1.0
+        )
 
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             outputs = model(samples)
-            loss, loss_dict = criterion(outputs, targets)
+            loss, loss_dict = criterion(outputs, targets, topo_scale=topo_scale)
 
         loss_value = float(loss.detach().item())
         if not math.isfinite(loss_value):
@@ -71,13 +75,28 @@ def train_one_epoch_seg(
             metric_logger.update(bce=loss_dict["bce"])
         if "dice" in loss_dict:
             metric_logger.update(dice_loss=loss_dict["dice"])
+        if "cldice" in loss_dict:
+            metric_logger.update(cldice_loss=loss_dict["cldice"])
+        if "skelrec" in loss_dict:
+            metric_logger.update(skelrec_loss=loss_dict["skelrec"])
+        if "topo_scale" in loss_dict:
+            metric_logger.update(topo_scale=loss_dict["topo_scale"])
 
         max_lr = max(group["lr"] for group in optimizer.param_groups)
         metric_logger.update(lr=max_lr)
 
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
-            epoch_1000x = int((data_iter_step / num_steps + epoch) * 1000)
+            epoch_1000x = int(progress * 1000)
             log_writer.add_scalar("loss/train", loss_value, epoch_1000x)
+            for term, tb_tag in [
+                ("bce", "loss/train_bce"),
+                ("dice", "loss/train_dice"),
+                ("cldice", "loss/train_cldice"),
+                ("skelrec", "loss/train_skelrec"),
+                ("topo_scale", "loss/topo_scale"),
+            ]:
+                if term in loss_dict:
+                    log_writer.add_scalar(tb_tag, loss_dict[term], epoch_1000x)
             log_writer.add_scalar("lr", max_lr, epoch_1000x)
 
     metric_logger.synchronize_between_processes()
@@ -184,7 +203,7 @@ def evaluate_seg(
 
     Returns:
       - stats_dict: dictionary of pooled and mean metrics
-      - val_score: pooled FOV Dice at threshold 0.5 (used for checkpoint selection)
+      - val_score: validation selection score (per `--select_metric`)
       - best_tau: threshold in [0.1, 0.9] maximizing pooled FOV Dice on this split
     """
     model.eval()
@@ -217,7 +236,7 @@ def evaluate_seg(
             # Compute validation loss from logit inverse of prob_b
             eps = 1e-6
             logit_b = torch.logit(prob_b.clamp(eps, 1.0 - eps))
-            loss_b, _ = criterion(logit_b, lbl_b)
+            loss_b, _ = criterion(logit_b, lbl_b, topo_scale=1.0)
             losses.append(float(loss_b.item()))
 
             prob_np = prob_b.squeeze().cpu().numpy().astype(np.float32)
@@ -231,7 +250,12 @@ def evaluate_seg(
 
     mean_loss = float(np.mean(losses)) if losses else 0.0
     res_05 = evaluate_dataset_predictions(
-        probs_list, gts_list, fov_masks=fovs_list, names=names_list, threshold=0.5
+        probs_list,
+        gts_list,
+        fov_masks=fovs_list,
+        names=names_list,
+        threshold=0.5,
+        compute_cldice_metric=True,
     )
 
     if opt_threshold is None:
@@ -241,13 +265,28 @@ def evaluate_seg(
     else:
         best_tau = float(opt_threshold)
         res_opt = evaluate_dataset_predictions(
-            probs_list, gts_list, fov_masks=fovs_list, names=names_list, threshold=best_tau
+            probs_list,
+            gts_list,
+            fov_masks=fovs_list,
+            names=names_list,
+            threshold=best_tau,
+            compute_cldice_metric=False,
         )
         best_dice = float(res_opt["pooled"]["dice"])
 
     pooled = res_05["pooled"]
     mean_m = res_05["mean"]
     std_m = res_05["std"]
+
+    select_metric = str(getattr(args, "select_metric", "dice_cldice"))
+    if select_metric == "dice":
+        val_score = float(pooled["dice"])
+    elif select_metric == "cldice":
+        val_score = float(mean_m["cldice"])
+    elif select_metric == "dice_cldice":
+        val_score = 0.5 * float(pooled["dice"]) + 0.5 * float(mean_m["cldice"])
+    else:
+        raise ValueError(f"Unknown select_metric: {select_metric}")
 
     print(
         f"[{mode.upper()} Epoch {epoch}] loss: {mean_loss:.4f} | "
@@ -259,6 +298,7 @@ def evaluate_seg(
     print(
         f"[{mode.upper()} Per-Img Mean±Std@0.5] "
         f"Dice: {mean_m['dice']:.4f}±{std_m['dice']:.4f}, "
+        f"clDice: {mean_m['cldice']:.4f}±{std_m['cldice']:.4f}, "
         f"AUC: {mean_m['auc']:.4f}±{std_m['auc']:.4f}, "
         f"Se: {mean_m['se']:.4f}±{std_m['se']:.4f}, "
         f"Sp: {mean_m['sp']:.4f}±{std_m['sp']:.4f}, "
@@ -272,21 +312,18 @@ def evaluate_seg(
         for k, v in mean_m.items():
             log_writer.add_scalar(f"perf_{mode}_mean/{k}", v, epoch)
         log_writer.add_scalar(f"perf_{mode}_pooled/dice_opt_tau", best_dice, epoch)
+        log_writer.add_scalar(f"perf_{mode}/select_score", val_score, epoch)
 
     # Save CSV metrics
+    pooled_metric_keys = ["dice", "jaccard", "auc", "se", "sp", "acc", "mcc"]
+    per_img_metric_keys = ["dice", "cldice", "jaccard", "auc", "se", "sp", "acc", "mcc"]
     fieldnames = [
         "epoch",
         "split",
         "name",
         "threshold",
         "loss",
-        "dice",
-        "jaccard",
-        "auc",
-        "se",
-        "sp",
-        "acc",
-        "mcc",
+        *per_img_metric_keys,
     ]
     if mode == "val":
         csv_path = os.path.join(task_dir, "metrics_val.csv")
@@ -302,7 +339,8 @@ def evaluate_seg(
                     "name": "POOLED_0.5",
                     "threshold": 0.5,
                     "loss": f"{mean_loss:.6f}",
-                    **{k: f"{pooled[k]:.6f}" for k in ["dice", "jaccard", "auc", "se", "sp", "acc", "mcc"]},
+                    "cldice": "",
+                    **{k: f"{pooled[k]:.6f}" for k in pooled_metric_keys},
                 }
             )
             writer.writerow(
@@ -312,7 +350,7 @@ def evaluate_seg(
                     "name": "MEAN_0.5",
                     "threshold": 0.5,
                     "loss": f"{mean_loss:.6f}",
-                    **{k: f"{mean_m[k]:.6f}" for k in ["dice", "jaccard", "auc", "se", "sp", "acc", "mcc"]},
+                    **{k: f"{mean_m[k]:.6f}" for k in per_img_metric_keys},
                 }
             )
     elif mode == "test":
@@ -328,7 +366,7 @@ def evaluate_seg(
                         "name": row["name"],
                         "threshold": 0.5,
                         "loss": f"{mean_loss:.6f}",
-                        **{k: f"{row[k]:.6f}" for k in ["dice", "jaccard", "auc", "se", "sp", "acc", "mcc"]},
+                        **{k: f"{row[k]:.6f}" for k in per_img_metric_keys},
                     }
                 )
             writer.writerow(
@@ -338,7 +376,8 @@ def evaluate_seg(
                     "name": "POOLED_0.5",
                     "threshold": 0.5,
                     "loss": f"{mean_loss:.6f}",
-                    **{k: f"{pooled[k]:.6f}" for k in ["dice", "jaccard", "auc", "se", "sp", "acc", "mcc"]},
+                    "cldice": "",
+                    **{k: f"{pooled[k]:.6f}" for k in pooled_metric_keys},
                 }
             )
             writer.writerow(
@@ -348,7 +387,7 @@ def evaluate_seg(
                     "name": "MEAN_0.5",
                     "threshold": 0.5,
                     "loss": f"{mean_loss:.6f}",
-                    **{k: f"{mean_m[k]:.6f}" for k in ["dice", "jaccard", "auc", "se", "sp", "acc", "mcc"]},
+                    **{k: f"{mean_m[k]:.6f}" for k in per_img_metric_keys},
                 }
             )
             writer.writerow(
@@ -358,7 +397,7 @@ def evaluate_seg(
                     "name": "STD_0.5",
                     "threshold": 0.5,
                     "loss": 0.0,
-                    **{k: f"{std_m[k]:.6f}" for k in ["dice", "jaccard", "auc", "se", "sp", "acc", "mcc"]},
+                    **{k: f"{std_m[k]:.6f}" for k in per_img_metric_keys},
                 }
             )
 
@@ -382,5 +421,7 @@ def evaluate_seg(
         **{f"std_{k}": v for k, v in std_m.items()},
         "best_tau": best_tau,
         "dice_at_best_tau": best_dice,
+        "select_metric": select_metric,
+        "select_score": val_score,
     }
-    return stats_out, float(pooled["dice"]), float(best_tau)
+    return stats_out, float(val_score), float(best_tau)
