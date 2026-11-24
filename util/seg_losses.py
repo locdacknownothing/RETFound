@@ -108,7 +108,7 @@ class VesselSegmentationLoss(nn.Module):
 
     def __init__(
         self,
-        loss_terms: str = "bce,dice,cldice,skelrec",
+        loss_terms: str = "bce,dice",
         bce_weight: float = 1.0,
         dice_weight: float = 1.0,
         cldice_weight: float = 0.3,

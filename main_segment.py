@@ -137,7 +137,7 @@ def get_args_parser():
     parser.add_argument("--clip_grad", default=1.0, type=float)
     parser.add_argument(
         "--loss",
-        default="bce,dice,cldice,skelrec",
+        default="bce,dice",
         type=str,
         help="Comma-separated loss terms: bce,dice[,cldice,skelrec]",
     )
@@ -153,7 +153,7 @@ def get_args_parser():
     parser.add_argument("--eval_every", default=5, type=int)
     parser.add_argument(
         "--select_metric",
-        default="dice_cldice",
+        default="dice",
         choices=["dice", "cldice", "dice_cldice"],
         help="Validation metric used to select checkpoint-best.pth",
     )
@@ -180,24 +180,35 @@ def build_optimizer_param_groups(model, args) -> List[Dict[str, object]]:
 
     dec_decay, dec_no_decay = [], []
     lora_decay, lora_no_decay = [], []
+    assigned_param_ids = set()
 
     vit_prefix = "vit_pyramid.vit."
+    stem_prefix = "vit_pyramid.patch_stem_adapter."
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
 
-        if name.startswith(vit_prefix):
-            if "lora_A" in name or "lora_B" in name:
-                if param.ndim == 1 or name.endswith(".bias"):
+        if name.startswith(vit_prefix) or name.startswith(stem_prefix):
+            if (
+                "lora_A" in name
+                or "lora_B" in name
+                or "adapter" in name.lower()
+                or name.startswith(vit_prefix + "patch_embed.")
+                or name.startswith(vit_prefix + "norm.")
+                or name.startswith(stem_prefix)
+            ):
+                if param.ndim == 1 or name.endswith(".bias") or "norm" in name:
                     lora_no_decay.append(param)
                 else:
                     lora_decay.append(param)
-            # Non-LoRA ViT parameters in 'finetune' mode are handled below via param_groups_lrd
+                assigned_param_ids.add(id(param))
+            # Non-LoRA/non-adapter/non-tokenizer ViT parameters in 'finetune' mode are handled below via param_groups_lrd
         else:
             if param.ndim == 1 or name.endswith(".bias") or "norm" in name or "bn" in name:
                 dec_no_decay.append(param)
             else:
                 dec_decay.append(param)
+            assigned_param_ids.add(id(param))
 
     if dec_decay:
         param_groups.append(
@@ -211,11 +222,11 @@ def build_optimizer_param_groups(model, args) -> List[Dict[str, object]]:
     lora_scale = float(args.lr_lora) / float(args.lr_decoder)
     if lora_decay:
         param_groups.append(
-            {"params": lora_decay, "lr_scale": lora_scale, "weight_decay": args.weight_decay, "group_name": "lora_decay"}
+            {"params": lora_decay, "lr_scale": lora_scale, "weight_decay": args.weight_decay, "group_name": "adapter_lora_decay"}
         )
     if lora_no_decay:
         param_groups.append(
-            {"params": lora_no_decay, "lr_scale": lora_scale, "weight_decay": 0.0, "group_name": "lora_no_decay"}
+            {"params": lora_no_decay, "lr_scale": lora_scale, "weight_decay": 0.0, "group_name": "adapter_lora_no_decay"}
         )
 
     if getattr(model, "use_vit", False) and args.adaptation == "finetune":
@@ -229,7 +240,7 @@ def build_optimizer_param_groups(model, args) -> List[Dict[str, object]]:
             layer_decay=args.layer_decay,
         )
         for g in vit_groups:
-            g["params"] = [p for p in g["params"] if p.requires_grad]
+            g["params"] = [p for p in g["params"] if p.requires_grad and id(p) not in assigned_param_ids]
             if g["params"]:
                 g["lr_scale"] = float(g["lr_scale"]) * backbone_scale
                 param_groups.append(g)
@@ -362,10 +373,15 @@ def main(args):
 
     # ---- Build model & criterion
     model = build_seg_model(args)
+    resumed_tau = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         msg = model.load_state_dict(ckpt["model"], strict=False)
-        print(f"[Resume] Loaded state from {args.resume} (missing={len(msg.missing_keys)})")
+        resumed_tau = ckpt.get("best_tau", None)
+        print(
+            f"[Resume] Loaded state from {args.resume} "
+            f"(missing={len(msg.missing_keys)}, best_tau={resumed_tau})"
+        )
 
     model.to(device)
     model_without_ddp = model
@@ -414,6 +430,7 @@ def main(args):
             mode="test",
             log_writer=None,
             save_preds=True,
+            opt_threshold=resumed_tau,
         )
         return
 

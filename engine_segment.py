@@ -113,7 +113,8 @@ def _forward_single_view(
     """Run forward pass on a `(1, 3, H, W)` image tensor and return probabilities `(1, 1, H, W)`."""
     _, _, H, W = img.shape
     if not sliding_window:
-        padded, (orig_h, orig_w) = pad_to_multiple(img, multiple=16, mode="reflect")
+        patch_mult = int(getattr(getattr(model, "vit_pyramid", None), "patch_size", 16))
+        padded, (orig_h, orig_w) = pad_to_multiple(img, multiple=patch_mult, mode="reflect")
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             logits = model(padded)
             if isinstance(logits, dict):
@@ -278,7 +279,7 @@ def evaluate_seg(
     mean_m = res_05["mean"]
     std_m = res_05["std"]
 
-    select_metric = str(getattr(args, "select_metric", "dice_cldice"))
+    select_metric = str(getattr(args, "select_metric", "dice"))
     if select_metric == "dice":
         val_score = float(pooled["dice"])
     elif select_metric == "cldice":
