@@ -303,11 +303,16 @@ class VesselSegDataset(Dataset):
             rgb_crop = np.ascontiguousarray(np.rot90(rgb_crop, k90))
             lbl_crop = np.ascontiguousarray(np.rot90(lbl_crop, k90))
 
-        # Random small rotation (-15 to +15 deg) with probability 0.5
-        if random.random() < 0.5:
-            angle = random.uniform(-15.0, 15.0)
+        # Random affine jitter: scale [0.90, 1.10], translation [-0.04*cs, 0.04*cs], rotation [-15, +15]
+        if random.random() < 0.6:
+            angle = random.uniform(-15.0, 15.0) if random.random() < 0.75 else 0.0
+            scale = random.uniform(0.90, 1.10)
+            tx = random.uniform(-0.04 * cs, 0.04 * cs)
+            ty = random.uniform(-0.04 * cs, 0.04 * cs)
             center = (cs * 0.5, cs * 0.5)
-            rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rot_mat = cv2.getRotationMatrix2D(center, angle, scale)
+            rot_mat[0, 2] += tx
+            rot_mat[1, 2] += ty
             rgb_crop = cv2.warpAffine(
                 rgb_crop,
                 rot_mat,
@@ -336,6 +341,11 @@ class VesselSegDataset(Dataset):
             img_t = TF.adjust_contrast(img_t, c_factor)
             img_t = TF.adjust_saturation(img_t, s_factor)
             img_t = TF.adjust_gamma(img_t.clamp(0.0, 1.0), gamma)
+
+        # Optional light Gaussian noise (p=0.2, std<=0.015)
+        if random.random() < 0.2:
+            noise_std = random.uniform(0.005, 0.015)
+            img_t = (img_t + torch.randn_like(img_t) * noise_std).clamp(0.0, 1.0)
 
         img_t = TF.normalize(img_t, mean=self.mean, std=self.std)
         lbl_t = torch.from_numpy((lbl_crop > 0).astype(np.float32)).unsqueeze(0)
