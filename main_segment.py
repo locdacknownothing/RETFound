@@ -29,6 +29,7 @@ from util.seg_datasets import (
     pair_split_files,
 )
 from util.seg_losses import VesselSegmentationLoss
+from util.seg_plots import plot_training_curves
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -80,7 +81,7 @@ def get_args_parser():
     )
     parser.add_argument(
         "--adaptation",
-        default="lora",
+        default="frozen",
         choices=["frozen", "lora", "finetune"],
         help="ViT backbone adaptation mode",
     )
@@ -567,6 +568,10 @@ def main(args):
             f,
             indent=2,
         )
+
+    plot_path = plot_training_curves(task_out_dir, best_epoch=best_epoch)
+    if plot_path is not None:
+        print(f"Saved training curves to {plot_path}")
 
     total_time = time.time() - start_time
     print(f"Training & evaluation completed in {datetime.timedelta(seconds=int(total_time))}")
