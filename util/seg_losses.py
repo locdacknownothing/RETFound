@@ -1,4 +1,6 @@
 from typing import Dict, List, Optional, Tuple, Union
+import numpy as np
+from skimage.morphology import skeletonize
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -76,7 +78,7 @@ class SoftClDiceLoss(nn.Module):
 
 
 class SkeletonRecallLoss(nn.Module):
-    """Soft recall penalty weighted on dilated ground-truth vessel skeletons."""
+    """Soft recall loss computed on undilated exact 1-px GT vessel skeletons."""
 
     def __init__(self, iter_: int = 10, smooth: float = 1.0):
         super().__init__()
@@ -86,11 +88,23 @@ class SkeletonRecallLoss(nn.Module):
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         with torch.amp.autocast(device_type=logits.device.type, enabled=False):
             probs = torch.sigmoid(logits.float())
-            targets_f = targets.float()
             with torch.no_grad():
-                skel_gt = soft_dilate((soft_skel(targets_f, self.iter) > 0.1).float())
-            intersection = (probs * skel_gt).sum(dim=(1, 2, 3))
-            denom = skel_gt.sum(dim=(1, 2, 3))
+                targets_bin = (targets.detach() > 0.5).cpu().numpy()
+                skels = []
+                for idx in range(targets_bin.shape[0]):
+                    mask_2d = targets_bin[idx, 0] if targets_bin.ndim == 4 else targets_bin[idx]
+                    if mask_2d.any():
+                        sk = skeletonize(mask_2d).astype(np.float32)
+                    else:
+                        sk = np.zeros_like(mask_2d, dtype=np.float32)
+                    skels.append(sk[:, :] if targets_bin.ndim == 3 else sk[None, :, :])
+                skel_gt = torch.from_numpy(np.stack(skels, axis=0)).to(
+                    device=probs.device, dtype=probs.dtype
+                )
+
+            sum_dims = (1, 2, 3) if probs.ndim == 4 else (1, 2)
+            intersection = (probs * skel_gt).sum(dim=sum_dims)
+            denom = skel_gt.sum(dim=sum_dims)
             recall = (intersection + self.smooth) / (denom + self.smooth)
             return (1.0 - recall).mean()
 
