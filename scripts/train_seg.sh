@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+
 # Dedicated retfound conda environment Python binary (per AGENTS.md / GEMINI.md rules)
 PYTHON="/workspace/miniconda3/envs/retfound/bin/python"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
