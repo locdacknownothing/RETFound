@@ -375,10 +375,18 @@ def main(args):
     # ---- Build model & criterion
     model = build_seg_model(args)
     resumed_tau = None
+    resumed_epoch = 0
+    resumed_val_score = None
+    resumed_val_dice = None
+    resumed_val_cldice = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         msg = model.load_state_dict(ckpt["model"], strict=False)
         resumed_tau = ckpt.get("best_tau", None)
+        resumed_epoch = ckpt.get("epoch", 0)
+        resumed_val_score = ckpt.get("best_val_score", None)
+        resumed_val_dice = ckpt.get("best_val_dice", None)
+        resumed_val_cldice = ckpt.get("best_val_cldice", None)
         print(
             f"[Resume] Loaded state from {args.resume} "
             f"(missing={len(msg.missing_keys)}, best_tau={resumed_tau})"
@@ -421,18 +429,50 @@ def main(args):
         log_writer = SummaryWriter(log_dir=os.path.join(args.log_dir, args.task))
 
     if args.eval:
-        evaluate_seg(
+        test_stats, test_score, _ = evaluate_seg(
             data_loader_test,
             model,
             criterion,
             device,
             args,
-            epoch=0,
+            epoch=resumed_epoch,
             mode="test",
             log_writer=None,
             save_preds=True,
             opt_threshold=resumed_tau,
         )
+        summary_path = os.path.join(task_out_dir, "summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "task": args.task,
+                    "model": args.model,
+                    "adaptation": args.adaptation,
+                    "seed": args.seed,
+                    "enhance": bool(args.enhance),
+                    "crop_size": int(args.crop_size),
+                    "crops_per_image": int(args.crops_per_image),
+                    "loss": args.loss,
+                    "bce_weight": float(args.bce_weight),
+                    "dice_weight": float(args.dice_weight),
+                    "cldice_weight": float(args.cldice_weight),
+                    "skelrec_weight": float(args.skelrec_weight),
+                    "cldice_iter": int(args.cldice_iter),
+                    "topo_warmup_epochs": int(args.topo_warmup_epochs),
+                    "select_metric": args.select_metric,
+                    "eval_only": True,
+                    "tta": bool(args.tta),
+                    "resume": args.resume,
+                    "best_val_epoch": resumed_epoch,
+                    "best_val_score": resumed_val_score,
+                    "best_val_dice_05": resumed_val_dice,
+                    "best_val_cldice_05": resumed_val_cldice,
+                    "best_val_tau": resumed_tau,
+                    "test": test_stats,
+                },
+                f,
+                indent=2,
+            )
         return
 
     print(f"Start vessel segmentation training for {args.epochs} epochs")
