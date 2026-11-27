@@ -59,7 +59,7 @@ All five pre-flight verification checks from the implementation plan passed:
 
 ## 5. Phase A Benchmark Results on DRIVE (3 Seeds: 0, 1, 2)
 
-All 9 Phase A experiments were executed via 3 cyclic parallel streams on a single NVIDIA A100-40GB GPU (`train_seg.sh`). Metrics below are reported on the 20 held-out DRIVE test images (FOV-masked for thresholded metrics at $\tau=0.5$ and validation-optimal $\tau^*$, and full-image for `AUC-ROC`).
+All 9 Phase A experiments were executed via 3 cyclic parallel streams on a single NVIDIA A100-40GB GPU (`scripts/train_seg.sh`). Metrics below are reported on the 20 held-out DRIVE test images (FOV-masked for thresholded metrics at $\tau=0.5$ and validation-optimal $\tau^*$, and full-image for `AUC-ROC`).
 
 ### 5.1 Aggregated 3-Seed Summary (`Mean ± Std`)
 
@@ -94,7 +94,7 @@ All 9 Phase A experiments were executed via 3 cyclic parallel streams on a singl
 
 ### Run the Full Phase A Benchmark Suite (E0, E1, E2 $\times$ 3 Seeds in 3 Parallel Streams)
 ```bash
-PATH="/workspace/miniconda3/envs/retfound/bin:$PATH" bash train_seg.sh
+PATH="/workspace/miniconda3/envs/retfound/bin:$PATH" bash scripts/train_seg.sh
 ```
 
 ### Run a Single Experiment (`RETFound_mae` + LoRA)

@@ -124,10 +124,10 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 
 
-5. Start fine-tuning by running `sh train.sh`.
+5. Start fine-tuning by running `sh scripts/train.sh`.
 
 
-In `train.sh`, the model can be selected by changing the hyperparameters `MODEL`, `MODEL_ARCH`, `FINETUNE`:
+In `scripts/train.sh`, the model can be selected by changing the hyperparameters `MODEL`, `MODEL_ARCH`, `FINETUNE`:
 
 **RETFound**:
 

@@ -33,9 +33,9 @@ When executing any Python commands, running scripts, training models, launching 
      ```bash
      source /workspace/miniconda3/etc/profile.d/conda.sh && conda activate retfound && python <script.py> [args]
      ```
-   - PATH prepending (when running shell scripts like `train.sh`):
+   - PATH prepending (when running shell scripts like `scripts/train.sh`):
      ```bash
-     PATH="/workspace/miniconda3/envs/retfound/bin:$PATH" bash train.sh
+     PATH="/workspace/miniconda3/envs/retfound/bin:$PATH" bash scripts/train.sh
      ```
 
 2. **Prohibited Executables**:

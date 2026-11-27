@@ -70,7 +70,7 @@ Both [`Dinov2`](../models_vit.py#L55-L75) and [`RETFound_dinov2`](../models_vit.
 
 > [!IMPORTANT]
 > **Hardcoded `img_size=224` in `Dinov2` / `RETFound_dinov2`**:
-> Unlike `RETFound_mae` (which receives `img_size=args.input_size`), [`Dinov2`](../models_vit.py#L72) and [`RETFound_dinov2`](../models_vit.py#L83) hardcode `img_size=224`. While [`get_args_parser()`](../main_finetune.py#L53) defaults `--input_size` to `256`, [train.sh](../train.sh#L26) explicitly passes `--input_size 224` so the dataset transforms match the `timm` model's `patch_embed` grid assertions.
+> Unlike `RETFound_mae` (which receives `img_size=args.input_size`), [`Dinov2`](../models_vit.py#L72) and [`RETFound_dinov2`](../models_vit.py#L83) hardcode `img_size=224`. While [`get_args_parser()`](../main_finetune.py#L53) defaults `--input_size` to `256`, [scripts/train.sh](../scripts/train.sh) explicitly passes `--input_size 224` so the dataset transforms match the `timm` model's `patch_embed` grid assertions.
 
 ### 2.3 DINOv3 Model
 [`Dinov3`](../models_vit.py#L89-L105) loads the architecture from `facebookresearch/dinov3` via `torch.hub.load(..., pretrained=False)` (where `model.head` is `nn.Identity` by default), inspects `model.embed_dim` or `model.num_features`, attaches a new `nn.Linear(feat_dim, args.nb_classes)` classification head, and initializes it with `trunc_normal_(std=2e-5)` and zero bias.
